@@ -1,0 +1,75 @@
+name: Install Nature Skills
+on:
+  push:
+    branches: [codex/install-nature-skills]
+    paths: [.github/workflows/install-nature-skills.yml]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  install:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: codex/install-nature-skills
+      - name: Fetch pinned upstream
+        env:
+          SOURCE_DIR: ${{ runner.temp }}/nature-skills-source
+        run: |
+          git init "$SOURCE_DIR"
+          git -C "$SOURCE_DIR" remote add origin https://github.com/Yuan1z0825/nature-skills.git
+          git -C "$SOURCE_DIR" fetch --depth 1 origin d774add241c65e89ed17a4da573b472b0972fd42
+          git -C "$SOURCE_DIR" checkout --detach FETCH_HEAD
+      - name: Install complete skills and license
+        env:
+          SOURCE_DIR: ${{ runner.temp }}/nature-skills-source
+        run: |
+          bash "$SOURCE_DIR/scripts/update-codex-skills.sh" --dest "$GITHUB_WORKSPACE/.agents/skills"
+          bash "$SOURCE_DIR/scripts/update-codex-skills.sh" --dest "$GITHUB_WORKSPACE/.agents/skills" --check
+          mkdir -p third-party/nature-skills
+          cp "$SOURCE_DIR/LICENSE" third-party/nature-skills/LICENSE
+          rm .agents/skills/.nature-skills-install.txt
+      - name: Verify complete tree, file contents and modes
+        env:
+          SOURCE_DIR: ${{ runner.temp }}/nature-skills-source
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, subprocess
+          source = pathlib.Path(os.environ["SOURCE_DIR"])
+          records = subprocess.check_output(["git", "-C", str(source), "ls-tree", "-r", "-z", "HEAD", "skills/"]).split(b"\0")
+          expected = set()
+          skills = set()
+          for record in records:
+              if not record:
+                  continue
+              metadata, raw_path = record.split(b"\t", 1)
+              mode, kind, sha = metadata.decode().split()
+              path = raw_path.decode()
+              relative = path.removeprefix("skills/")
+              target = pathlib.Path(".agents/skills") / relative
+              assert kind == "blob", (path, kind)
+              actual_sha = subprocess.check_output(["git", "hash-object", str(target)], text=True).strip()
+              assert actual_sha == sha, path
+              assert bool(target.stat().st_mode & 0o111) == (mode == "100755"), path
+              expected.add(relative)
+              if relative.count("/") == 1 and relative.endswith("/SKILL.md"):
+                  skills.add(relative.split("/")[0])
+          actual = {str(p.relative_to(".agents/skills")) for p in pathlib.Path(".agents/skills").rglob("*") if p.is_file()}
+          assert actual == expected, (actual - expected, expected - actual)
+          assert "nature-shared" in skills
+          assert len(skills) == 24 and len(expected) == 818, (len(skills), len(expected))
+          print(f"Verified {len(skills)} complete skill directories and {len(expected)} files, including nature-shared.")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as report:
+              report.write(f"Verified {len(skills)} skill directories and {len(expected)} files against upstream d774add241c65e89ed17a4da573b472b0972fd42. All Git blob hashes and executable modes match.\\n")
+          PY
+          git diff --check
+      - name: Commit verified installation
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .agents/skills third-party/nature-skills/LICENSE
+          if ! git diff --cached --quiet; then
+            git commit -m "Install and verify complete Nature Skills collection"
+            git push origin HEAD:codex/install-nature-skills
+          fi
